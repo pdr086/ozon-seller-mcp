@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "ozon-seller",
+  "version": "0.1.0",
+  "description": "Продажи, остатки, возвраты и текущие цены подключённого магазина Ozon Seller.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Ozon Seller",
+        "shortDescription": "Аналитика магазина Ozon Seller",
+        "longDescription": "Читайте продажи, остатки, возвраты и цены своего магазина через приватный MCP.",
+        "capabilities": ["Read"],
+        "defaultPrompt": ["Покажи продажи за неделю", "Какие товары заканчиваются?", "Проанализируй возвраты"]
+      }
+    }
+  }
+}

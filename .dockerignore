@@ -1,0 +1,7 @@
+*
+!requirements.txt
+!ozon_seller
+!ozon_seller/**
+!skills
+!skills/**
+**/__pycache__
