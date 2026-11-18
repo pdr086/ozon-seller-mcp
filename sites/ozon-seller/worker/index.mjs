@@ -112,7 +112,7 @@ function sellerClient(env) {
     let response;
     try {
       response = await fetch(`https://api-seller.ozon.ru${endpoint}`, {
-        method: "POST", redirect: "error", signal: AbortSignal.timeout(Math.min(remaining, 8_000)),
+        method: "POST", redirect: "manual", signal: AbortSignal.timeout(Math.min(remaining, 8_000)),
         headers: { "Client-Id": env.OZON_CLIENT_ID, "Api-Key": env.OZON_API_KEY, "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
@@ -282,7 +282,7 @@ async function callPrivateMcp(env, name, args) {
   const timeout = setTimeout(() => controller.abort(), 40_000);
   try {
     const response = await fetch(url.href, {
-      method: "POST", redirect: "error", signal: controller.signal,
+      method: "POST", redirect: "manual", signal: controller.signal,
       headers: {
         Authorization: `Bearer ${env.OZON_MCP_TOKEN}`,
         "Content-Type": "application/json", Accept: "application/json, text/event-stream",
