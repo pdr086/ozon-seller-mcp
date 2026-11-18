@@ -82,3 +82,24 @@ test("private MCP rejects a redirect without forwarding the bearer credential", 
   assert.equal(result.structuredContent.error, "mcp_http_307");
   assert.equal(fetch.mock.callCount(), 1);
 });
+
+test("Sites advertises the catalog for the VPS and preserves validation errors", async t => {
+  const bindings = { OZON_OWNER_EMAIL: env.OZON_OWNER_EMAIL, OZON_MCP_URL: "https://mcp.example.test/mcp", OZON_MCP_TOKEN: "dummy-bridge-token" };
+  const ids = (await rpc("tools/list", {}, owner, bindings)).tools.map(tool => tool.name);
+  assert.equal(ids.length, 9);
+  assert.ok(ids.includes("find_products"));
+  const fetch = t.mock.method(globalThis, "fetch", async (_url, init) => {
+    const { params } = JSON.parse(init.body);
+    assert.deepEqual(params, {
+      name: "read_ozon_operation", arguments: { operation: "/v1/product/import", arguments: {} },
+    });
+    return Response.json({ result: { structuredContent: { ok: false, error: "operation_not_allowed" } } });
+  });
+  const params = { operation: "/v1/product/import", arguments: {} };
+  assert.equal((await call("read_ozon_operation", params, {}, bindings)).structuredContent.error, "owner_required");
+  assert.equal((await call("read_ozon_operation", { ...params, arguments: [] }, owner, bindings)).structuredContent.error, "invalid_arguments");
+  assert.equal(fetch.mock.callCount(), 0);
+  const blocked = await call("read_ozon_operation", params, owner, bindings);
+  assert.equal(blocked.isError, true);
+  assert.equal(blocked.structuredContent.error, "operation_not_allowed");
+});

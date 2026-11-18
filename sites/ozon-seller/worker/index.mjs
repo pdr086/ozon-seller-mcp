@@ -1,5 +1,5 @@
 const protocol = "2026-07-28";
-const instructions = "Неофициальный плагин для Ozon Seller. Только чтение. Отличай демо от данных магазина, указывай период и неполный охват. Продажи означают заказанные штуки и сумму заказов, а не выплаты. Для цены нужен точный артикул. Не запрашивай секреты в чате.";
+const instructions = "Неофициальный плагин для Ozon Seller. Только чтение. Отличай демо от данных магазина, указывай период и неполный охват. Продажи означают заказанные штуки и сумму заказов, а не выплаты. Ищи артикул по названию через find_products, если этот инструмент доступен. Для дополнительных данных используй find_ozon_operations, затем describe_ozon_operation и read_ozon_operation. Не запрашивай секреты в чате.";
 const dayMs = 86_400_000;
 const timezone = "Europe/Moscow";
 const dates = {
@@ -36,6 +36,23 @@ const tools = [
     offer_id: { type: "string", minLength: 1, maxLength: 200 },
   }, ["offer_id"]),
 ];
+const privateTools = [
+  tool("find_products", "Поиск товара", "Ищет товар по части названия, SKU, product_id, артикулу или штрихкоду.", {
+    query: { type: "string", minLength: 1, maxLength: 200 },
+    limit: { type: "integer", minimum: 1, maximum: 25 },
+  }, ["query"]),
+  tool("find_ozon_operations", "Поиск операций Ozon", "Находит доступные методы чтения Seller API по теме или пути. Без запроса показывает весь каталог.", {
+    query: { type: "string", maxLength: 200 },
+  }),
+  tool("describe_ozon_operation", "Параметры операции Ozon", "Возвращает схему параметров выбранного метода чтения.", {
+    operation: { type: "string", minLength: 1, maxLength: 150 },
+  }, ["operation"]),
+  tool("read_ozon_operation", "Получить данные Ozon", "Выполняет один разрешённый метод чтения. Сначала запросите его схему.", {
+    operation: { type: "string", minLength: 1, maxLength: 150 },
+    arguments: { type: "object" },
+  }, ["operation", "arguments"]),
+];
+const hasPrivateMcp = env => Boolean(env.OZON_MCP_URL || env.OZON_MCP_TOKEN);
 
 class ToolError extends Error {
   constructor(code, message) {
@@ -268,7 +285,8 @@ function validate(tool, args) {
     if (!Object.hasOwn(properties, key)) throw invalid();
     const field = properties[key];
     if (field.type === "integer" && (!Number.isSafeInteger(value) || value < field.minimum || value > field.maximum)) throw invalid();
-    if (field.type === "string" && (typeof value !== "string" || !value.trim() || value.length > (field.maxLength ?? 20))) throw invalid();
+    if (field.type === "string" && (typeof value !== "string" || (field.minLength ?? 0) > value.trim().length || value.length > (field.maxLength ?? 20))) throw invalid();
+    if (field.type === "object" && !object(value)) throw invalid();
     if (field.enum && !field.enum.includes(value)) throw invalid();
   }
 }
@@ -298,7 +316,7 @@ async function callPrivateMcp(env, name, args) {
     const text = result?.content?.find(item => item?.type === "text")?.text;
     const data = result?.structuredContent ?? (typeof text === "string" ? JSON.parse(text) : null);
     if (!object(data) || typeof data.ok !== "boolean") throw malformed();
-    if (result.isError || !data.ok) {
+    if (result.isError) {
       throw new ToolError("mcp_tool_error", "MCP не смог прочитать данные Ozon. Проверьте подключение магазина.");
     }
     return { source: "ozon_seller_api", ...data };
@@ -311,12 +329,12 @@ async function callPrivateMcp(env, name, args) {
 }
 
 async function call(params, request, env) {
-  const tool = tools.find(item => item.name === params?.name);
+  const privateMcp = hasPrivateMcp(env);
+  const tool = (privateMcp ? [...tools, ...privateTools] : tools).find(item => item.name === params?.name);
   if (!tool) throw new ToolError("unknown_tool", "Такого инструмента нет. Изменения магазина не поддерживаются.");
   const args = params.arguments ?? {};
   validate(tool, args);
   const { OZON_OWNER_EMAIL, OZON_CLIENT_ID, OZON_API_KEY } = env;
-  const privateMcp = Boolean(env.OZON_MCP_URL || env.OZON_MCP_TOKEN);
   const demo = !(OZON_OWNER_EMAIL || OZON_CLIENT_ID || OZON_API_KEY || privateMcp);
   const viewer = request.headers.get("oai-authenticated-user-email");
   const identityVerified = Boolean(viewer && request.headers.get("oai-authenticated-user-id"));
@@ -370,11 +388,12 @@ export default {
       case "initialize":
         return reply(rpc.id, { result: { protocolVersion: [protocol, "2025-11-25", "2025-06-18"].includes(rpc.params?.protocolVersion) ? rpc.params.protocolVersion : protocol, serverInfo: { name: "ozon-seller-sites", version: "0.1.0" }, capabilities: { tools: {} }, instructions } });
       case "ping": return reply(rpc.id, { result: {} });
-      case "tools/list": return reply(rpc.id, { result: { tools } });
+      case "tools/list": return reply(rpc.id, { result: { tools: hasPrivateMcp(env) ? [...tools, ...privateTools] : tools } });
       case "tools/call": {
         let result;
         try {
-          result = toolResult(await call(rpc.params, request, env));
+          const data = await call(rpc.params, request, env);
+          result = toolResult(data, !data.ok);
         } catch (error) {
           result = toolResult(error instanceof ToolError ? { ok: false, error: error.code, message: error.message } : { ok: false, error: "internal_error", message: "Не удалось выполнить запрос к Ozon." }, true);
         }

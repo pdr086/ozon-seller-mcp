@@ -6,6 +6,9 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 import httpx
+from pydantic import ValidationError
+
+from .read_catalog import OPERATIONS
 
 API_URL = "https://api-seller.ozon.ru"
 ROLES = "/v1/roles"
@@ -13,7 +16,7 @@ ANALYTICS = "/v1/analytics/data"
 STOCKS = "/v4/product/info/stocks"
 RETURNS = "/v1/returns/list"
 PRICES = "/v5/product/info/prices"
-READ_METHODS = frozenset({ROLES, ANALYTICS, STOCKS, RETURNS, PRICES})
+READ_METHODS = frozenset({ROLES, ANALYTICS, STOCKS, RETURNS, PRICES, *OPERATIONS})
 PAGE_SIZE = 100
 MAX_PAGES = 30
 READ_BUDGET = 30
@@ -90,6 +93,37 @@ def api_timestamp(day, at, zone):
     return datetime.combine(day, at, zone).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def select_fields(row, fields):
+    if not isinstance(row, dict):
+        raise bad_response()
+    return {key: row[key] for key in fields if key in row}
+
+
+def project_response(projection, response):
+    if projection == "full":
+        return response
+    projected = select_fields(response, ("cursor", "has_next", "last_id"))
+    if projection == "warehouses":
+        fields = ("warehouse_id", "name", "warehouse_type", "status", "is_rfbs", "is_kgt", "working_days", "postings_limit")
+        projected["warehouses"] = [select_fields(row, fields) for row in array(response, "warehouses")]
+    elif projection == "postings":
+        fields = ("posting_number", "order_id", "status", "substatus", "created_at", "shipment_date", "in_process_at")
+        products = ("offer_id", "sku", "name", "quantity", "price")
+        projected["postings"] = [
+            {**select_fields(row, fields), "products": [select_fields(item, products) for item in array(row, "products")]}
+            for row in array(response, "postings")
+        ]
+    elif projection == "accruals":
+        fields = ("accrual_id", "date", "accrued_category")
+        projected["accruals"] = [
+            {**select_fields(row, fields), "total_amount": select_fields(mapping(row, "total_amount"), ("amount", "currency"))}
+            for row in array(response, "accruals")
+        ]
+    else:
+        raise ValueError("Unknown Ozon response projection")
+    return projected
+
+
 class Seller:
     def __init__(self, credentials, zone_name="Europe/Moscow", transport=None):
         self.zone = ZoneInfo(zone_name)
@@ -141,6 +175,79 @@ class Seller:
             except (ValueError, AttributeError):
                 expiry = None
         return {"ok": True, "connected": True, "key_expires_at": expiry, "read_only": True}
+
+    def find_products(self, query, limit):
+        def normalized(value):
+            return " ".join(str(value).casefold().replace("ё", "е").split())
+
+        terms = normalized(query).split()
+        if not terms:
+            raise SellerError("invalid_query", "Укажите название или идентификатор товара.")
+        matched = []
+        seen = set()
+        cursor = ""
+        examined = 0
+        complete = False
+        deadline = monotonic() + 23
+        for _ in range(MAX_PAGES):
+            if monotonic() >= deadline:
+                break
+            page = self.post("/v3/product/list", {
+                "filter": {"visibility": "ALL"}, "limit": PAGE_SIZE, "last_id": cursor,
+            })
+            result = mapping(page, "result")
+            items = array(result, "items")
+            if not items:
+                complete = True
+                break
+            if monotonic() >= deadline:
+                break
+            ids = [str(item["product_id"]) for item in items]
+            details = self.post("/v3/product/info/list", {"product_id": ids})
+            rows = array(details, "items")
+            if len(rows) != len(ids):
+                raise bad_response()
+            for row in rows:
+                fields = ("id", "offer_id", "sku", "name", "barcodes", "price", "currency_code", "is_archived")
+                item = {key: row[key] for key in fields if key in row}
+                search_fields = [item.get(key, "") for key in ("id", "offer_id", "sku", "name")]
+                search_fields.extend(item.get("barcodes") or [])
+                haystack = normalized(" ".join(map(str, search_fields)))
+                if all(term in haystack for term in terms):
+                    matched.append(item)
+            examined += len(rows)
+            count = result.get("total_items", result.get("total"))
+            cursor = result.get("last_id")
+            if not cursor or (type(count) is int and examined >= count):
+                complete = True
+                break
+            if not isinstance(cursor, str) or cursor in seen:
+                raise bad_response()
+            seen.add(cursor)
+
+        def rank(item):
+            exact_id = any(normalized(item.get(key, "")) == normalized(query) for key in ("id", "sku", "offer_id"))
+            name = normalized(item.get("name", ""))
+            return (not exact_id, name != normalized(query), bool(item.get("is_archived")), name)
+
+        matched.sort(key=rank)
+        return {"ok": True, "complete": complete, "examined": examined, "matched": len(matched), "items": matched[:limit]}
+
+    def read_operation(self, operation, arguments):
+        entry = OPERATIONS.get(operation)
+        if entry is None:
+            raise SellerError("operation_not_allowed", "Выберите доступную операцию чтения через find_ozon_operations.")
+        try:
+            request = entry.request.model_validate(arguments)
+        except ValidationError as error:
+            fields = [".".join(map(str, issue["loc"])) for issue in error.errors()[:8]]
+            raise SellerError("invalid_arguments", "Сверьте параметры со схемой describe_ozon_operation.", fields=fields) from None
+        response = self.post(entry.path, request.model_dump(mode="json", exclude_none=True))
+        response = project_response(entry.response, response)
+        encoded = json.dumps(response, ensure_ascii=False, default=str)
+        if len(encoded.encode()) > 96 * 1024:
+            raise SellerError("response_too_large", "Сузьте фильтр или запросите меньше записей.", operation=operation)
+        return {"ok": True, "operation": operation, "data": json.loads(encoded)}
 
     def sales_summary(self, start_date=None, end_date=None):
         start, end = period(start_date, end_date, self.zone)

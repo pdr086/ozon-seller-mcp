@@ -42,4 +42,6 @@ python -m uvicorn ozon_seller.bearer_bridge:app --host 127.0.0.1 --port 8767 --n
 
 В личном Site используйте три серверных секрета `OZON_OWNER_EMAIL`, `OZON_MCP_URL` и `OZON_MCP_TOKEN`. Последний содержит тот же отдельный токен экземпляра. Удалите из Site временные копии `OZON_CLIENT_ID` и `OZON_API_KEY` после перехода. Ключ Ozon хранится на VPS. Опубликуйте Site приватно и проверьте `connection_status` через плагин. Доступ к инструментам требует совпадения подтверждённого адреса аккаунта с `OZON_OWNER_EMAIL`.
 
+Для поиска товаров по названию и доступа к каталогу операций обновите MCP и Worker до одной версии. В режиме VPS `tools/list` должен вернуть прежние пять инструментов и четыре дополнительных: `find_products`, `find_ozon_operations`, `describe_ozon_operation`, `read_ozon_operation`. Приватная публикация обновлённого Worker обновляет список инструментов того же плагина.
+
 [Как создать ChatGPT Site](https://help.openai.com/en/articles/20001339-creating-and-using-chatgpt-sites) · [Как подключить Site-плагин](https://help.openai.com/en/articles/20001547-hosting-a-plugin-with-chatgpt-sites) · [Ozon Seller API](https://docs.ozon.ru/api/seller/)
