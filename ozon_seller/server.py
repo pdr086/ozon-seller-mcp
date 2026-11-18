@@ -9,7 +9,6 @@ from pydantic import Field
 
 from . import config
 from .ozon import Seller, SellerError
-from .read_catalog import DOCS, OPERATIONS, search
 
 SKILL = Path(__file__).resolve().parents[1] / "skills/ozon-seller/SKILL.md"
 READ_ONLY = ToolAnnotations(
@@ -75,20 +74,17 @@ def create_server(path, zone_name):
 
     @server.tool(annotations=READ_ONLY)
     async def find_ozon_operations(query: Annotated[str, Field(max_length=200)] = "") -> dict:
-        """Ищет по теме или пути среди доступных операций чтения Seller API. Пустой запрос показывает весь каталог."""
-        return search(query)
+        """Ищет методы чтения по теме или пути. Список разрешений получается из актуальных read-only ролей Ozon. Без запроса показывает весь каталог."""
+        return await anyio.to_thread.run_sync(partial(call, "find_operations", query))
 
     @server.tool(annotations=READ_ONLY)
     async def describe_ozon_operation(operation: Annotated[str, Field(max_length=150)]) -> dict:
         """Возвращает схему параметров выбранной операции и ссылку на документацию Ozon."""
-        entry = OPERATIONS.get(operation)
-        if entry is None:
-            return {"ok": False, "error": "operation_not_allowed", "message": "Сначала выберите операцию из каталога."}
-        return {"ok": True, **entry.summary(), "documentation": DOCS, "input_schema": entry.request.model_json_schema()}
+        return await anyio.to_thread.run_sync(partial(call, "describe_operation", operation))
 
-    @server.tool(annotations=READ_ONLY)
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=False))
     async def read_ozon_operation(operation: Annotated[str, Field(max_length=150)], arguments: dict) -> dict:
-        """Вызывает один метод чтения из каталога с аргументами из его схемы. Доступ ограничен подключённым магазином."""
+        """Вызывает разрешённый Ozon метод чтения с параметрами из схемы. Некоторые методы создают файлы отчётов и этикеток. Доступ ограничен подключённым магазином."""
         return await anyio.to_thread.run_sync(partial(call, "read_operation", operation, arguments))
 
     return server

@@ -1,4 +1,6 @@
 import json
+from hashlib import sha256
+from threading import Lock
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -9,6 +11,7 @@ import httpx
 from pydantic import ValidationError
 
 from .read_catalog import OPERATIONS
+from . import api_knowledge
 
 API_URL = "https://api-seller.ozon.ru"
 ROLES = "/v1/roles"
@@ -20,6 +23,8 @@ READ_METHODS = frozenset({ROLES, ANALYTICS, STOCKS, RETURNS, PRICES, *OPERATIONS
 PAGE_SIZE = 100
 MAX_PAGES = 30
 READ_BUDGET = 30
+ROLE_CACHE = {}
+ROLE_LOCK = Lock()
 
 HTTP_PROBLEMS = {
     400: ("request_rejected", "Ozon отклонил параметры запроса."),
@@ -124,9 +129,22 @@ def project_response(projection, response):
     return projected
 
 
+def redact_credentials(value, api_key):
+    if isinstance(value, dict):
+        sensitive = {"api_key", "api-key", "authorization", "access_token", "refresh_token", "client_secret"}
+        return {key: redact_credentials(item, api_key) for key, item in value.items() if key.casefold() not in sensitive}
+    if isinstance(value, list):
+        return [redact_credentials(item, api_key) for item in value]
+    if isinstance(value, str):
+        return value.replace(api_key, "[скрыто]")
+    return value
+
+
 class Seller:
     def __init__(self, credentials, zone_name="Europe/Moscow", transport=None):
         self.zone = ZoneInfo(zone_name)
+        self.permission_cache_key = sha256((credentials["client_id"] + "\0" + credentials["api_key"]).encode()).hexdigest()
+        self.api_key = credentials["api_key"]
         self.http = httpx.Client(
             base_url=API_URL,
             headers={"Client-Id": credentials["client_id"], "Api-Key": credentials["api_key"]},
@@ -143,14 +161,29 @@ class Seller:
         self.http.close()
 
     def post(self, method, payload):
-        if method not in READ_METHODS:
+        if method not in READ_METHODS and method not in self.read_methods():
             raise ValueError("Unsupported Ozon read method")
+        verb = api_knowledge.summary(method)["http_method"]
+        kwargs = {"params": payload} if verb == "GET" else {"json": payload}
         try:
-            with self.http.stream("POST", method, json=payload) as response:
+            with self.http.stream(verb, method, **kwargs) as response:
                 status = response.status_code
                 if status != 200:
                     code, message = HTTP_PROBLEMS.get(status, ("ozon_unavailable", "Seller API временно недоступен."))
-                    raise SellerError(code, message, http_status=status)
+                    details = {"http_status": status}
+                    if status == 400:
+                        content = bytearray()
+                        for chunk in response.iter_bytes():
+                            content.extend(chunk)
+                            if len(content) > 32768:
+                                break
+                        try:
+                            hint = json.loads(content).get("message")
+                            if isinstance(hint, str):
+                                details["provider_message"] = hint.replace(self.api_key, "[скрыто]")[:1500]
+                        except (ValueError, AttributeError):
+                            pass
+                    raise SellerError(code, message, **details)
                 chunks = bytearray()
                 for chunk in response.iter_bytes():
                     chunks.extend(chunk)
@@ -165,6 +198,32 @@ class Seller:
         if not isinstance(body, dict):
             raise bad_response()
         return body
+
+    def read_methods(self):
+        now = monotonic()
+        with ROLE_LOCK:
+            saved = ROLE_CACHE.get(self.permission_cache_key)
+        if saved is not None and saved[0] > now:
+            return saved[1]
+        roles = self.post(ROLES, {}).get("roles")
+        try:
+            methods = api_knowledge.readonly_methods(roles)
+        except ValueError:
+            raise bad_response() from None
+        with ROLE_LOCK:
+            for key, entry in list(ROLE_CACHE.items()):
+                if entry[0] <= now:
+                    ROLE_CACHE.pop(key)
+            ROLE_CACHE[self.permission_cache_key] = (now + 300, methods)
+        return methods
+
+    def find_operations(self, query):
+        return api_knowledge.search_catalog(self.read_methods() | frozenset(OPERATIONS), query)
+
+    def describe_operation(self, operation):
+        if operation not in OPERATIONS and operation not in self.read_methods():
+            raise SellerError("operation_not_allowed", "Эта операция не предоставлена Ozon в ролях только для чтения.")
+        return api_knowledge.describe(operation)
 
     def connection_status(self):
         body = self.post(ROLES, {})
@@ -235,16 +294,25 @@ class Seller:
 
     def read_operation(self, operation, arguments):
         entry = OPERATIONS.get(operation)
-        if entry is None:
+        if entry is None and operation not in self.read_methods():
             raise SellerError("operation_not_allowed", "Выберите доступную операцию чтения через find_ozon_operations.")
-        try:
-            request = entry.request.model_validate(arguments)
-        except ValidationError as error:
-            fields = [".".join(map(str, issue["loc"])) for issue in error.errors()[:8]]
-            raise SellerError("invalid_arguments", "Сверьте параметры со схемой describe_ozon_operation.", fields=fields) from None
-        response = self.post(entry.path, request.model_dump(mode="json", exclude_none=True))
-        response = project_response(entry.response, response)
-        encoded = json.dumps(response, ensure_ascii=False, default=str)
+        if not isinstance(arguments, dict):
+            raise SellerError("invalid_arguments", "Параметры должны быть объектом JSON.")
+        if entry is not None:
+            try:
+                request = entry.request.model_validate(arguments)
+            except ValidationError as error:
+                fields = [".".join(map(str, issue["loc"])) for issue in error.errors()[:8]]
+                raise SellerError("invalid_arguments", "Сверьте параметры со схемой describe_ozon_operation.", fields=fields) from None
+            arguments = request.model_dump(mode="json", exclude_none=True)
+        else:
+            fields = api_knowledge.validate_snapshot(operation, arguments)
+            if fields:
+                raise SellerError("invalid_arguments", "Сверьте параметры со схемой describe_ozon_operation.", fields=fields)
+        response = self.post(operation, arguments)
+        if entry is not None:
+            response = project_response(entry.response, response)
+        encoded = json.dumps(redact_credentials(response, self.api_key), ensure_ascii=False, default=str)
         if len(encoded.encode()) > 96 * 1024:
             raise SellerError("response_too_large", "Сузьте фильтр или запросите меньше записей.", operation=operation)
         return {"ok": True, "operation": operation, "data": json.loads(encoded)}

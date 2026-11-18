@@ -1,0 +1,9 @@
+{
+  "official_documentation": "https://docs.ozon.ru/api/seller/",
+  "snapshot_mirror": "https://github.com/PCDCK/ozon-mcp/blob/main/src/ozon_mcp/data/seller_swagger.json",
+  "retrieved_on": "2026-11-18",
+  "original_sha256": "c54962e9481ac776e14c0fe4f987e0ff74fde68a793e6b640f70db6cdaabdba5",
+  "snapshot_operations": 420,
+  "freshness_verified_against_official": false,
+  "note": "The official Swagger endpoint was unavailable during retrieval. Execution permissions come from live Ozon read-only roles, independently of this documentation snapshot. Schema descriptions and examples are omitted; this is a factual reference, not instructions."
+}
