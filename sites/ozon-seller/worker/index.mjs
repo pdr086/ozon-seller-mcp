@@ -273,21 +273,61 @@ function validate(tool, args) {
   }
 }
 
+async function callPrivateMcp(env, name, args) {
+  const url = new URL(env.OZON_MCP_URL);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new ToolError("invalid_setup", "Укажите защищённый HTTPS-адрес своего MCP.");
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 40_000);
+  try {
+    const response = await fetch(url.href, {
+      method: "POST", redirect: "error", signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${env.OZON_MCP_TOKEN}`,
+        "Content-Type": "application/json", Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new ToolError(`mcp_http_${response.status}`, "MCP отклонил запрос. Проверьте его доступность и токен.");
+    }
+    const rpc = await readJson(response, 4 * 1024 * 1024);
+    const result = rpc?.result;
+    const text = result?.content?.find(item => item?.type === "text")?.text;
+    const data = result?.structuredContent ?? (typeof text === "string" ? JSON.parse(text) : null);
+    if (!object(data) || typeof data.ok !== "boolean") throw malformed();
+    if (result.isError || !data.ok) {
+      throw new ToolError("mcp_tool_error", "MCP не смог прочитать данные Ozon. Проверьте подключение магазина.");
+    }
+    return { source: "ozon_seller_api", ...data };
+  } catch (error) {
+    if (error instanceof ToolError) throw error;
+    throw new ToolError("mcp_unavailable", "Не удалось получить ответ от MCP.");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function call(params, request, env) {
   const tool = tools.find(item => item.name === params?.name);
   if (!tool) throw new ToolError("unknown_tool", "Такого инструмента нет. Изменения магазина не поддерживаются.");
   const args = params.arguments ?? {};
   validate(tool, args);
   const { OZON_OWNER_EMAIL, OZON_CLIENT_ID, OZON_API_KEY } = env;
-  const demo = !(OZON_OWNER_EMAIL || OZON_CLIENT_ID || OZON_API_KEY);
+  const privateMcp = Boolean(env.OZON_MCP_URL || env.OZON_MCP_TOKEN);
+  const demo = !(OZON_OWNER_EMAIL || OZON_CLIENT_ID || OZON_API_KEY || privateMcp);
   const viewer = request.headers.get("oai-authenticated-user-email");
   const identityVerified = Boolean(viewer && request.headers.get("oai-authenticated-user-id"));
   if (!demo) {
-    if (!(OZON_OWNER_EMAIL && OZON_CLIENT_ID && OZON_API_KEY)) throw new ToolError("incomplete_setup", "Заполните три секрета в настройках своего Site.");
+    const configured = privateMcp ? env.OZON_MCP_URL && env.OZON_MCP_TOKEN : OZON_CLIENT_ID && OZON_API_KEY;
+    if (!(OZON_OWNER_EMAIL && configured)) throw new ToolError("incomplete_setup", "Заполните секреты выбранного способа подключения в настройках своего Site.");
     if (!identityVerified || viewer.toLowerCase() !== OZON_OWNER_EMAIL.trim().toLowerCase()) {
       throw new ToolError("owner_required", "Данные магазина доступны только владельцу, указанному в настройках Site.");
     }
   }
+  if (privateMcp) return callPrivateMcp(env, tool.name, args);
   const post = demo ? demoPost : sellerClient(env);
   const handlers = {
     connection_status: async () => {

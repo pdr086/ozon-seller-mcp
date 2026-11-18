@@ -54,3 +54,18 @@ test("checks the live owner and only sends credentials to the Ozon Seller API", 
   assert.deepEqual(structuredContent, { ok: true, source: "ozon_seller_api", connected: true, read_only: true, verified_sites_identity: true });
   assert.equal(fetch.mock.callCount(), 1);
 });
+
+test("private MCP accepts legacy text results and rejects other owners before fetching", async t => {
+  const bindings = { OZON_OWNER_EMAIL: env.OZON_OWNER_EMAIL, OZON_MCP_URL: "https://mcp.example.test/mcp", OZON_MCP_TOKEN: "dummy-bridge-token" };
+  const fetch = t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.equal(url, bindings.OZON_MCP_URL);
+    assert.equal(init.headers.Authorization, "Bearer dummy-bridge-token");
+    assert.equal(init.redirect, "error");
+    assert.equal(JSON.parse(init.body).params.name, "connection_status");
+    return Response.json({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify({ ok: true, connected: true, read_only: true }) }], isError: false } });
+  });
+  assert.equal((await call("connection_status", {}, {}, bindings)).structuredContent.error, "owner_required");
+  assert.equal(fetch.mock.callCount(), 0);
+  assert.deepEqual((await call("connection_status", {}, owner, bindings)).structuredContent, { ok: true, connected: true, read_only: true, source: "ozon_seller_api" });
+  assert.equal(fetch.mock.callCount(), 1);
+});
