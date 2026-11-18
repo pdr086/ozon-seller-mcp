@@ -9,3 +9,5 @@ data/
 credentials.json
 .app.json
 mcp.json
+bridge.env
+ozon-seller-sites.zip
