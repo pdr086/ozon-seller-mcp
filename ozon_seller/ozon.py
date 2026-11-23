@@ -141,7 +141,8 @@ def redact_credentials(value, api_key):
 
 
 class Seller:
-    def __init__(self, credentials, zone_name="Europe/Moscow", transport=None):
+    def __init__(self, credentials, zone_name="Europe/Moscow", transport=None, report_dir=None):
+        self.report_dir = report_dir
         self.zone = ZoneInfo(zone_name)
         self.permission_cache_key = sha256((credentials["client_id"] + "\0" + credentials["api_key"]).encode()).hexdigest()
         self.api_key = credentials["api_key"]
@@ -218,9 +219,17 @@ class Seller:
         return methods
 
     def find_operations(self, query):
-        return api_knowledge.search_catalog(self.read_methods() | frozenset(OPERATIONS), query)
+        from . import store_reports
+        result = api_knowledge.search_catalog(self.read_methods() | frozenset(OPERATIONS), query)
+        reports = store_reports.search(query)
+        result["operations"] = reports + result["operations"]
+        result["available_store_reports"] = len(store_reports.REPORTS)
+        return result
 
     def describe_operation(self, operation):
+        from . import store_reports
+        if operation in store_reports.REPORTS:
+            return store_reports.describe(operation)
         if operation not in OPERATIONS and operation not in self.read_methods():
             raise SellerError("operation_not_allowed", "Эта операция не предоставлена Ozon в ролях только для чтения.")
         return api_knowledge.describe(operation)
@@ -293,6 +302,12 @@ class Seller:
         return {"ok": True, "complete": complete, "examined": examined, "matched": len(matched), "items": matched[:limit]}
 
     def read_operation(self, operation, arguments):
+        from . import store_reports
+        if operation in store_reports.REPORTS:
+            result = store_reports.run(self, self.report_dir, operation, arguments)
+            if len(json.dumps(result, ensure_ascii=False).encode()) > 96 * 1024:
+                raise SellerError("response_too_large", "Отчёт превышает лимит ответа.")
+            return result
         entry = OPERATIONS.get(operation)
         if entry is None and operation not in self.read_methods():
             raise SellerError("operation_not_allowed", "Выберите доступную операцию чтения через find_ozon_operations.")

@@ -33,7 +33,7 @@ def create_server(path, zone_name):
 
     def call(method, *args):
         try:
-            with Seller(config.load(path), zone_name) as seller:
+            with Seller(config.load(path), zone_name, report_dir=path.parent) as seller:
                 return getattr(seller, method)(*args)
         except SellerError as error:
             return error.payload
